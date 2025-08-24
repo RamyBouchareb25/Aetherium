@@ -35,6 +35,7 @@ import {
   Edit3,
   ChevronRight,
   ChevronDown,
+  ShieldOff,
 } from "lucide-react"
 
 interface Header {
@@ -49,6 +50,7 @@ interface HttpRequest {
   headers: Header[]
   body: string
   bodyType: "json" | "text" | "form" | "none"
+  insecureSSL: boolean
 }
 
 interface HttpResponse {
@@ -98,6 +100,7 @@ export function HttpClient() {
     headers: [{ key: "", value: "", enabled: true }],
     body: "",
     bodyType: "json",
+    insecureSSL: false,
   })
 
   const [response, setResponse] = useState<HttpResponse | null>(null)
@@ -292,6 +295,7 @@ export function HttpClient() {
           url: request.url.trim(),
           headers: enabledHeaders,
           body: requestBody,
+          insecureSSL: request.insecureSSL,
         }),
       })
 
@@ -516,6 +520,7 @@ export function HttpClient() {
                 headers: [{ key: "", value: "", enabled: true }],
                 body: "",
                 bodyType: "json",
+                insecureSSL: false,
               })
               setResponse(null)
             }}
@@ -964,10 +969,34 @@ export function HttpClient() {
                   onChange={(e) => setRequest((prev) => ({ ...prev, url: e.target.value }))}
                   className="flex-1"
                 />
+                <Button
+                  variant={request.insecureSSL ? "destructive" : "outline"}
+                  size="sm"
+                  onClick={() =>
+                    setRequest((prev) => ({
+                      ...prev,
+                      insecureSSL: !prev.insecureSSL,
+                    }))
+                  }
+                  className="px-3"
+                  title={request.insecureSSL ? "SSL verification disabled (insecure)" : "Enable insecure SSL (skip certificate verification)"}
+                >
+                  <ShieldOff className="w-4 h-4" />
+                  {request.insecureSSL && <span className="ml-1 text-xs">INSECURE</span>}
+                </Button>
                 <Button onClick={sendRequest} disabled={loading || !request.url} className="px-6">
                   {loading ? "Sending..." : "Send"}
                 </Button>
               </div>
+
+              {request.insecureSSL && (
+                <div className="flex items-center gap-2 p-3 bg-destructive/10 border border-destructive/20 rounded-md">
+                  <ShieldOff className="w-4 h-4 text-destructive" />
+                  <span className="text-sm text-destructive font-medium">
+                    ⚠️ SSL certificate verification is disabled (insecure mode)
+                  </span>
+                </div>
+              )}
 
               <Tabs defaultValue="headers" className="w-full">
                 <TabsList className="grid w-full grid-cols-4">
@@ -1053,7 +1082,47 @@ export function HttpClient() {
                 </TabsContent>
 
                 <TabsContent value="auth">
-                  <p className="text-muted-foreground">Authentication options coming soon.</p>
+                  <div className="space-y-4">
+                    <div className="p-4 border border-border rounded-lg bg-muted/50">
+                      <div className="flex items-center space-x-2 mb-2">
+                        <input
+                          type="checkbox"
+                          id="insecure-ssl-detailed"
+                          checked={request.insecureSSL}
+                          onChange={(e) =>
+                            setRequest((prev) => ({
+                              ...prev,
+                              insecureSSL: e.target.checked,
+                            }))
+                          }
+                          className="h-4 w-4 rounded border border-input bg-background ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                        />
+                        <Label htmlFor="insecure-ssl-detailed" className="text-sm font-medium">
+                          Allow Insecure SSL (Skip certificate verification)
+                        </Label>
+                        {request.insecureSSL && (
+                          <Badge variant="destructive" className="text-xs">
+                            INSECURE
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="text-xs text-muted-foreground space-y-1">
+                        <p>⚠️ This option disables SSL certificate verification, similar to curl&apos;s --insecure flag.</p>
+                        <p>• Use only for testing with self-signed certificates or development environments</p>
+                        <p>• Never use in production or with sensitive data</p>
+                        <p>• This is equivalent to: <code className="bg-muted px-1 rounded">curl --insecure</code></p>
+                      </div>
+                    </div>
+                    <div className="text-muted-foreground">
+                      <p className="text-sm">Other authentication options coming soon:</p>
+                      <ul className="text-xs mt-2 space-y-1 ml-4">
+                        <li>• Bearer Token</li>
+                        <li>• Basic Auth</li>
+                        <li>• API Key</li>
+                        <li>• OAuth 2.0</li>
+                      </ul>
+                    </div>
+                  </div>
                 </TabsContent>
               </Tabs>
             </CardContent>
@@ -1088,6 +1157,12 @@ export function HttpClient() {
                     </Badge>
                     <Badge variant="outline">{formatFileSize(response.size)}</Badge>
                     {response.redirected && <Badge variant="secondary">Redirected</Badge>}
+                    {request.insecureSSL && (
+                      <Badge variant="destructive" className="text-xs" title="Request made with SSL verification disabled">
+                        <ShieldOff className="w-3 h-3 mr-1" />
+                        INSECURE SSL
+                      </Badge>
+                    )}
                     <Button variant="outline" size="sm" onClick={downloadResponse}>
                       <Download className="w-4 h-4" />
                     </Button>
