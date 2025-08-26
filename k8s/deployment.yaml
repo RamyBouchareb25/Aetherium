@@ -18,6 +18,16 @@ spec:
         version: v1.0.0
         component: frontend
     spec:
+      # Add host aliases to inject custom DNS entries into /etc/hosts
+      hostAliases:
+      - ip: "192.168.1.100"  # Replace with your actual IP
+        hostnames:
+        - "api-preprod.e-tayssir.alsalamalgeria.local"
+      - ip: "192.168.1.101"  # Add more entries as needed
+        hostnames:
+        - "api-staging.e-tayssir.alsalamalgeria.local"
+        - "internal-service.company.local"
+      
       containers:
       - name: aetherium
         image: ramybouchareb/aetherium
@@ -32,6 +42,9 @@ spec:
           value: "3000"
         - name: HOSTNAME
           value: "0.0.0.0"
+        # Custom DNS mappings for domains not available in pod
+        - name: DNS_MAPPINGS
+          value: "api-preprod.e-tayssir.alsalamalgeria.local=192.168.1.100,api-staging.e-tayssir.alsalamalgeria.local=192.168.1.101"
         resources:
           requests:
             memory: "128Mi"
