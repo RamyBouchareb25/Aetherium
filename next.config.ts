@@ -1,10 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: 'standalone',
-  experimental: {
-    turbo: {}
-  }
+  output: "standalone",
+  turbopack: {},
 };
 
 export default nextConfig;

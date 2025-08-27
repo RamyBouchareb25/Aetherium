@@ -2,7 +2,7 @@
 
 import type React from "react"
 
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -15,6 +15,14 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Progress } from "@/components/ui/progress"
 import { Separator } from "@/components/ui/separator"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { 
+  useDatabase, 
+  type HistoryItem, 
+  type Collection, 
+  type CollectionRequest, 
+  type HttpRequest, 
+  type HttpResponse 
+} from "@/hooks/useDatabase"
 import {
   Trash2,
   Plus,
@@ -45,58 +53,22 @@ interface Header {
   enabled: boolean
 }
 
-interface HttpRequest {
-  method: string
-  url: string
-  headers: Header[]
-  body: string
-  bodyType: "json" | "text" | "form" | "none"
-  insecureSSL: boolean
-  caCertificate?: string // Base64 encoded CA certificate
-}
-
-interface HttpResponse {
-  status: number
-  statusText: string
-  headers: Record<string, string>
-  body: string
-  time: number
-  size: number
-  url?: string
-  redirected?: boolean
-  request?: {
-    method: string
-    url: string
-    headers: Record<string, string>
-    body?: string
-  }
-}
-
-interface HistoryItem {
-  id: string
-  request: HttpRequest
-  response: HttpResponse
-  timestamp: number
-  name?: string
-}
-
-interface CollectionRequest {
-  id: string
-  name: string
-  request: HttpRequest
-  description?: string
-}
-
-interface Collection {
-  id: string
-  name: string
-  description?: string
-  requests: CollectionRequest[]
-  expanded?: boolean
-  caCertificate?: string // Base64 encoded CA certificate for the entire collection
-}
-
 export function HttpClient() {
+  const {
+    history,
+    collections,
+    loading: dbLoading,
+    saveHistoryItem,
+    deleteHistoryItem,
+    clearHistory,
+    saveCollection,
+    updateCollection,
+    deleteCollection,
+    saveRequestToCollection,
+    updateCollectionRequest,
+    deleteCollectionRequest,
+  } = useDatabase();
+
   const [request, setRequest] = useState<HttpRequest>({
     method: "GET",
     url: "",
@@ -109,12 +81,10 @@ export function HttpClient() {
 
   const [response, setResponse] = useState<HttpResponse | null>(null)
   const [loading, setLoading] = useState(false)
-  const [history, setHistory] = useState<HistoryItem[]>([])
   const [historySearch, setHistorySearch] = useState("")
   const [historyFilter, setHistoryFilter] = useState<string>("all")
   const [showHistoryDialog, setShowHistoryDialog] = useState(false)
 
-  const [collections, setCollections] = useState<Collection[]>([])
   const [showCollectionsDialog, setShowCollectionsDialog] = useState(false)
   const [newCollectionName, setNewCollectionName] = useState("")
   const [editingCollection, setEditingCollection] = useState<string | null>(null)
@@ -125,38 +95,6 @@ export function HttpClient() {
   const [caCertFor, setCaCertFor] = useState<{ type: 'request' | 'collection', id?: string }>({ type: 'request' })
 
   const httpMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
-
-  useEffect(() => {
-    const savedHistory = localStorage.getItem("http-client-history")
-    if (savedHistory) {
-      try {
-        setHistory(JSON.parse(savedHistory))
-      } catch (error) {
-        console.error("Failed to load history:", error)
-      }
-    }
-
-    const savedCollections = localStorage.getItem("http-client-collections")
-    if (savedCollections) {
-      try {
-        setCollections(JSON.parse(savedCollections))
-      } catch (error) {
-        console.error("Failed to load collections:", error)
-      }
-    }
-  }, [])
-
-  useEffect(() => {
-    if (history.length > 0) {
-      localStorage.setItem("http-client-history", JSON.stringify(history))
-    }
-  }, [history])
-
-  useEffect(() => {
-    if (collections.length > 0) {
-      localStorage.setItem("http-client-collections", JSON.stringify(collections))
-    }
-  }, [collections])
 
   const addHeader = () => {
     setRequest((prev) => ({
@@ -179,7 +117,7 @@ export function HttpClient() {
     }))
   }
 
-  const createCollection = () => {
+  const createCollection = async () => {
     if (!newCollectionName.trim()) return
 
     const newCollection: Collection = {
@@ -189,24 +127,30 @@ export function HttpClient() {
       expanded: true,
     }
 
-    setCollections((prev) => [...prev, newCollection])
+    await saveCollection(newCollection)
     setNewCollectionName("")
   }
 
-  const deleteCollection = (collectionId: string) => {
-    setCollections((prev) => prev.filter((c) => c.id !== collectionId))
+  const handleDeleteCollection = async (collectionId: string) => {
+    await deleteCollection(collectionId)
   }
 
-  const updateCollectionName = (collectionId: string, newName: string) => {
-    setCollections((prev) => prev.map((c) => (c.id === collectionId ? { ...c, name: newName } : c)))
+  const updateCollectionName = async (collectionId: string, newName: string) => {
+    const collection = collections.find(c => c.id === collectionId)
+    if (collection) {
+      await updateCollection({ ...collection, name: newName })
+    }
     setEditingCollection(null)
   }
 
-  const toggleCollection = (collectionId: string) => {
-    setCollections((prev) => prev.map((c) => (c.id === collectionId ? { ...c, expanded: !c.expanded } : c)))
+  const toggleCollection = async (collectionId: string) => {
+    const collection = collections.find(c => c.id === collectionId)
+    if (collection) {
+      await updateCollection({ ...collection, expanded: !collection.expanded })
+    }
   }
 
-  const saveCurrentRequestToCollection = (collectionId: string) => {
+  const saveCurrentRequestToCollection = async (collectionId: string) => {
     if (!request.url) return
 
     const newRequest: CollectionRequest = {
@@ -215,28 +159,15 @@ export function HttpClient() {
       request: { ...request },
     }
 
-    setCollections((prev) =>
-      prev.map((c) => (c.id === collectionId ? { ...c, requests: [...c.requests, newRequest] } : c)),
-    )
+    await saveRequestToCollection(collectionId, newRequest)
   }
 
-  const deleteRequestFromCollection = (collectionId: string, requestId: string) => {
-    setCollections((prev) =>
-      prev.map((c) => (c.id === collectionId ? { ...c, requests: c.requests.filter((r) => r.id !== requestId) } : c)),
-    )
+  const deleteRequestFromCollection = async (collectionId: string, requestId: string) => {
+    await deleteCollectionRequest(collectionId, requestId)
   }
 
-  const updateRequestName = (collectionId: string, requestId: string, newName: string) => {
-    setCollections((prev) =>
-      prev.map((c) =>
-        c.id === collectionId
-          ? {
-              ...c,
-              requests: c.requests.map((r) => (r.id === requestId ? { ...r, name: newName } : r)),
-            }
-          : c,
-      ),
-    )
+  const updateRequestName = async (collectionId: string, requestId: string, newName: string) => {
+    await updateCollectionRequest(collectionId, requestId, newName)
     setEditingRequest(null)
   }
 
@@ -324,16 +255,22 @@ export function HttpClient() {
     URL.revokeObjectURL(url)
   }
 
-  const importCollections = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const importCollections = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
 
     const reader = new FileReader()
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const importedCollections = JSON.parse(e.target?.result as string)
         if (Array.isArray(importedCollections)) {
-          setCollections((prev) => [...prev, ...importedCollections])
+          // Save each imported collection to the database
+          for (const collection of importedCollections) {
+            await saveCollection({
+              ...collection,
+              id: `collection-${Date.now()}-${Math.random().toString(36).substr(2, 9)}` // Generate new ID
+            })
+          }
         }
       } catch (error) {
         console.error("Failed to import collections:", error)
@@ -419,7 +356,7 @@ export function HttpClient() {
         name: `${request.method} ${new URL(request.url).pathname}`,
       }
 
-      setHistory((prev) => [historyItem, ...prev.slice(0, 99)]) // Keep last 100 requests
+      await saveHistoryItem(historyItem)
     } catch (error) {
       console.error("Request failed:", error)
       const errorResponse: HttpResponse = {
@@ -440,19 +377,18 @@ export function HttpClient() {
         name: `${request.method} ${request.url} (Failed)`,
       }
 
-      setHistory((prev) => [historyItem, ...prev.slice(0, 99)])
+      await saveHistoryItem(historyItem)
     } finally {
       setLoading(false)
     }
   }
 
-  const clearHistory = () => {
-    setHistory([])
-    localStorage.removeItem("http-client-history")
+  const handleClearHistory = async () => {
+    await clearHistory()
   }
 
-  const deleteHistoryItem = (id: string) => {
-    setHistory((prev) => prev.filter((item) => item.id !== id))
+  const handleDeleteHistoryItem = async (id: string) => {
+    await deleteHistoryItem(id)
   }
 
   const exportHistory = () => {
