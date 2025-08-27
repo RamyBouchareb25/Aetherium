@@ -1,6 +1,127 @@
 import { type NextRequest, NextResponse } from "next/server"
-import https from "https"
-import { lookup } from "dns"
+import { lookup } from "dns/promises"
+import { promisify } from "util"
+import dns from "dns"
+import fs from "fs"
+import https from "node:https"
+import http from "node:http"
+
+const dnsLookup = promisify(dns.lookup)
+
+// Custom request function for handling insecure SSL
+async function makeRequest(url: string, options: RequestInit & { insecureSSL?: boolean }): Promise<Response> {
+  const { insecureSSL, ...fetchOptions } = options
+  
+  // If insecure SSL is not requested, use normal fetch
+  if (!insecureSSL || !url.startsWith('https://')) {
+    return fetch(url, fetchOptions)
+  }
+
+  // For insecure SSL HTTPS requests, use Node.js https module
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(url)
+    const isHttps = parsedUrl.protocol === 'https:'
+    
+    const requestOptions = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (isHttps ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: fetchOptions.method || 'GET',
+      headers: fetchOptions.headers as Record<string, string>,
+      rejectUnauthorized: false, // This is the key for insecure SSL
+    }
+
+    const client = isHttps ? https : http
+    
+    const req = client.request(requestOptions, (res) => {
+      let data = ''
+      
+      res.on('data', (chunk) => {
+        data += chunk
+      })
+      
+      res.on('end', () => {
+        // Create a Response-like object
+        const response = new Response(data, {
+          status: res.statusCode || 200,
+          statusText: res.statusMessage || 'OK',
+          headers: new Headers(res.headers as Record<string, string>)
+        })
+        
+        // Add additional properties to match fetch Response
+        Object.defineProperty(response, 'url', { value: url, writable: false })
+        Object.defineProperty(response, 'redirected', { value: false, writable: false })
+        
+        resolve(response)
+      })
+    })
+
+    req.on('error', (error) => {
+      reject(error)
+    })
+
+    // Handle request timeout
+    if (fetchOptions.signal) {
+      fetchOptions.signal.addEventListener('abort', () => {
+        req.destroy()
+        reject(new Error('Request aborted'))
+      })
+    }
+
+    // Write body if present
+    if (fetchOptions.body) {
+      req.write(fetchOptions.body)
+    }
+    
+    req.end()
+  })
+}
+
+// Helper function to check environment DNS mappings
+function getEnvDnsMapping(hostname: string): string | null {
+  const dnsMappings = process.env.DNS_MAPPINGS
+  if (!dnsMappings) return null
+  
+  try {
+    const mappings = dnsMappings.split(',')
+    for (const mapping of mappings) {
+      const [host, ip] = mapping.split('=').map(s => s.trim())
+      if (host === hostname) {
+        return ip
+      }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+// Helper function to check /etc/hosts for debugging
+async function checkEtcHosts(hostname: string): Promise<string | null> {
+  try {
+    const hostsContent = await fs.promises.readFile('/etc/hosts', 'utf8')
+    console.log(`[DEBUG] /etc/hosts content:\n${hostsContent}`)
+    const lines = hostsContent.split('\n')
+    
+    for (const line of lines) {
+      const trimmedLine = line.trim()
+      if (!trimmedLine || trimmedLine.startsWith('#')) continue
+      
+      const parts = trimmedLine.split(/\s+/)
+      if (parts.length >= 2) {
+        const ip = parts[0]
+        const hostnames = parts.slice(1)
+        
+        if (hostnames.includes(hostname)) {
+          return ip
+        }
+      }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
 
 export async function POST(request: NextRequest) {
   const requestId = `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
@@ -45,46 +166,69 @@ export async function POST(request: NextRequest) {
     // Resolve hostname to IP if it's a domain name
     const hostname = parsedUrl.hostname
     const isDirectIP = /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname) || /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/.test(hostname)
+    let resolvedUrl = url // Will be modified if we need to use a custom IP
+    let customResolution = false
     
     if (isDirectIP) {
       console.log(`[${requestId}] Direct IP address detected: ${hostname}`)
     } else {
       console.log(`[${requestId}] Domain name detected: ${hostname}`)
       try {
-        const dnsResult = await new Promise<{ address: string; family: number }>((resolve, reject) => {
-          lookup(hostname, { all: false, family: 0 }, (err, address, family) => {
-            if (err) {
-              reject(err)
-            } else {
-              resolve({ address, family })
-            }
-          })
-        })
+        // Use the callback-based dns.lookup with promisify for better /etc/hosts support
+        const dnsResult = await dnsLookup(hostname, { family: 0 }) // family: 0 means both IPv4 and IPv6
         console.log(`[${requestId}] DNS Resolution: ${hostname} -> ${dnsResult.address} (family: IPv${dnsResult.family})`)
       } catch (dnsError) {
-        console.log(`[${requestId}] DNS Resolution failed: ${dnsError instanceof Error ? dnsError.message : 'Unknown DNS error'}`)
+        console.log(`[${requestId}] Primary DNS Resolution failed: ${dnsError instanceof Error ? dnsError.message : 'Unknown DNS error'}`)
         
         // Try alternative resolution methods
-        console.log(`[${requestId}] Attempting alternative DNS resolution methods...`)
-        
         try {
-          // Try using the system's getaddrinfo more directly
-          const alternativeResult = await new Promise<{ address: string; family: number }>((resolve, reject) => {
-            lookup(hostname, (err, address, family) => {
-              if (err) {
-                reject(err)
-              } else {
-                resolve({ address, family })
-              }
-            })
-          })
-          console.log(`[${requestId}] Alternative DNS Resolution: ${hostname} -> ${alternativeResult.address} (family: IPv${alternativeResult.family})`)
-        } catch (altError) {
-          console.log(`[${requestId}] Alternative DNS Resolution also failed: ${altError instanceof Error ? altError.message : 'Unknown error'}`)
-          console.log(`[${requestId}] Please check if '${hostname}' exists in /etc/hosts or is resolvable via DNS`)
-          console.log(`[${requestId}] Continuing with request (DNS resolution is for logging only)`)
+          // Try with explicit IPv4 family
+          const ipv4Result = await dnsLookup(hostname, { family: 4 })
+          console.log(`[${requestId}] IPv4 DNS Resolution: ${hostname} -> ${ipv4Result.address}`)
+        } catch (ipv4Error) {
+          console.log(`[${requestId}] IPv4 DNS Resolution also failed: ${ipv4Error instanceof Error ? ipv4Error.message : 'Unknown error'}`)
+          
+          // Try to use the direct dns/promises lookup as fallback
+          try {
+            const fallbackResult = await lookup(hostname)
+            console.log(`[${requestId}] Fallback DNS Resolution: ${hostname} -> ${fallbackResult.address} (family: IPv${fallbackResult.family})`)
+          } catch (fallbackError) {
+            console.log(`[${requestId}] All DNS Resolution attempts failed`)
+            console.log(`[${requestId}] Final error: ${fallbackError instanceof Error ? fallbackError.message : 'Unknown error'}`)
+            
+            // Check environment mappings first (higher priority)
+            const envMapping = getEnvDnsMapping(hostname)
+            // Check /etc/hosts as fallback
+            const hostsEntry = await checkEtcHosts(hostname)
+            
+            if (envMapping) {
+              console.log(`[${requestId}] Found in environment DNS mappings: ${hostname} -> ${envMapping}`)
+              console.log(`[${requestId}] ✅ Using environment-configured DNS mapping for request`)
+              // Replace the hostname in the URL with the resolved IP
+              resolvedUrl = url.replace(hostname, envMapping)
+              customResolution = true
+            } else if (hostsEntry) {
+              console.log(`[${requestId}] Found in /etc/hosts: ${hostname} -> ${hostsEntry}`)
+              console.log(`[${requestId}] ✅ Using /etc/hosts entry for request`)
+              // Replace the hostname in the URL with the resolved IP
+              resolvedUrl = url.replace(hostname, hostsEntry)
+              customResolution = true
+            } else {
+              console.log(`[${requestId}] Not found in /etc/hosts or environment mappings`)
+              console.log(`[${requestId}] This may indicate:`)
+              console.log(`[${requestId}] - Domain is not in /etc/hosts file`)
+              console.log(`[${requestId}] - Domain is not configured in DNS_MAPPINGS environment variable`)
+              console.log(`[${requestId}] - Domain is not resolvable via system DNS`)
+              console.log(`[${requestId}] - Network connectivity issues`)
+              console.log(`[${requestId}] Continuing with original hostname (request may fail)`)
+            }
+          }
         }
       }
+    }
+    
+    if (customResolution) {
+      console.log(`[${requestId}] Modified URL for custom resolution: ${url} -> ${resolvedUrl}`)
     }
 
     // Validate HTTP method
@@ -100,6 +244,12 @@ export async function POST(request: NextRequest) {
     const requestHeaders: Record<string, string> = {
       "User-Agent": "HTTP-Client-Server/1.0",
       ...headers,
+    }
+
+    // If we're using custom resolution, add the original hostname as Host header
+    if (customResolution) {
+      requestHeaders["Host"] = hostname
+      console.log(`[${requestId}] Added Host header for custom resolution: ${hostname}`)
     }
 
     console.log(`[${requestId}] Final request headers:`, JSON.stringify(requestHeaders, null, 2))
@@ -140,6 +290,12 @@ export async function POST(request: NextRequest) {
         body: requestBody,
         signal: controller.signal,
       }
+
+
+      if (insecureSSL && resolvedUrl.startsWith('https://')) {
+        console.log(`[${requestId}] Configuring INSECURE SSL mode (certificate verification disabled)`)
+      } else if (resolvedUrl.startsWith('https://')) {
+        console.log(`[${requestId}] Using secure SSL (certificate verification enabled)`)
 
       // Handle SSL configuration for HTTPS requests
       if (url.startsWith('https://')) {
@@ -183,21 +339,29 @@ export async function POST(request: NextRequest) {
         } else {
           console.log(`[${requestId}] Using secure SSL (default certificate verification)`)
         }
+
       } else {
         console.log(`[${requestId}] HTTP request (no SSL)`)
       }
 
       console.log(`[${requestId}] ===== OUTGOING HTTP REQUEST =====`)
-      console.log(`[${requestId}] Target: ${method.toUpperCase()} ${url}`)
+      console.log(`[${requestId}] Target: ${method.toUpperCase()} ${resolvedUrl}`)
+      if (customResolution) {
+        console.log(`[${requestId}] Original URL: ${url}`)
+        console.log(`[${requestId}] Using custom DNS resolution: ${hostname} -> ${resolvedUrl.includes('://') ? new URL(resolvedUrl).hostname : 'IP'}`)
+      }
       console.log(`[${requestId}] Fetch options:`, JSON.stringify({
         method: fetchOptions.method,
         headers: fetchOptions.headers,
         body: fetchOptions.body,
-        hasCustomAgent: !!(fetchOptions as Record<string, unknown>).agent
+        insecureSSL: insecureSSL
       }, null, 2))
 
-      // Make the request from the server
-      const response = await fetch(url, fetchOptions)
+      // Make the request from the server using the resolved URL with our custom function
+      const response = await makeRequest(resolvedUrl, {
+        ...fetchOptions,
+        insecureSSL: insecureSSL
+      })
 
       const endTime = Date.now()
       const responseTime = endTime - startTime
