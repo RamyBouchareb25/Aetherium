@@ -127,7 +127,7 @@ export async function POST(request: NextRequest) {
   const requestId = `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
   
   try {
-    const { method, url, headers, body, insecureSSL } = await request.json()
+    const { method, url, headers, body, insecureSSL, caCertificate } = await request.json()
 
     // Log incoming request
     console.log(`[${requestId}] ===== INCOMING REQUEST =====`)
@@ -138,6 +138,7 @@ export async function POST(request: NextRequest) {
     console.log(`[${requestId}]   Method: ${method}`)
     console.log(`[${requestId}]   URL: ${url}`)
     console.log(`[${requestId}]   Insecure SSL: ${insecureSSL ? 'YES (SSL verification disabled)' : 'NO'}`)
+    console.log(`[${requestId}]   Custom CA Certificate: ${caCertificate ? 'YES (Custom CA provided)' : 'NO'}`)
     console.log(`[${requestId}]   Headers:`, JSON.stringify(headers, null, 2))
     console.log(`[${requestId}]   Body: ${body ? (typeof body === 'string' ? body : JSON.stringify(body)) : '(no body)'}`)
 
@@ -290,10 +291,55 @@ export async function POST(request: NextRequest) {
         signal: controller.signal,
       }
 
+
       if (insecureSSL && resolvedUrl.startsWith('https://')) {
         console.log(`[${requestId}] Configuring INSECURE SSL mode (certificate verification disabled)`)
       } else if (resolvedUrl.startsWith('https://')) {
         console.log(`[${requestId}] Using secure SSL (certificate verification enabled)`)
+
+      // Handle SSL configuration for HTTPS requests
+      if (url.startsWith('https://')) {
+        if (insecureSSL) {
+          console.log(`[${requestId}] Configuring INSECURE SSL mode (certificate verification disabled)`)
+          // Create custom agent that ignores SSL certificate errors
+          const agent = new https.Agent({
+            rejectUnauthorized: false
+          })
+          
+          // Add the agent to fetch options
+          // @ts-expect-error - Node.js specific fetch options
+          fetchOptions.agent = agent
+        } else if (caCertificate) {
+          console.log(`[${requestId}] Configuring SSL with custom CA certificate`)
+          try {
+            // Decode base64 certificate
+            const caCertPem = Buffer.from(caCertificate, 'base64').toString('utf-8')
+            
+            // Validate certificate format
+            if (!caCertPem.includes('BEGIN CERTIFICATE') && !caCertPem.includes('BEGIN TRUSTED CERTIFICATE')) {
+              console.log(`[${requestId}] ERROR: Invalid CA certificate format`)
+              return NextResponse.json({ error: "Invalid CA certificate format" }, { status: 400 })
+            }
+
+            // Create custom agent with CA certificate
+            const agent = new https.Agent({
+              ca: caCertPem,
+              rejectUnauthorized: true
+            })
+            
+            // Add the agent to fetch options
+            // @ts-expect-error - Node.js specific fetch options
+            fetchOptions.agent = agent
+            
+            console.log(`[${requestId}] Custom CA certificate configured successfully`)
+          } catch (error) {
+            console.log(`[${requestId}] ERROR: Failed to process CA certificate: ${error instanceof Error ? error.message : 'Unknown error'}`)
+            return NextResponse.json({ error: "Failed to process CA certificate" }, { status: 400 })
+          }
+        } else {
+          console.log(`[${requestId}] Using secure SSL (default certificate verification)`)
+        }
+
       } else {
         console.log(`[${requestId}] HTTP request (no SSL)`)
       }

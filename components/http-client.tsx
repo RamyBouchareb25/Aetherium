@@ -36,6 +36,7 @@ import {
   ChevronRight,
   ChevronDown,
   ShieldOff,
+  FileKey,
 } from "lucide-react"
 
 interface Header {
@@ -51,6 +52,7 @@ interface HttpRequest {
   body: string
   bodyType: "json" | "text" | "form" | "none"
   insecureSSL: boolean
+  caCertificate?: string // Base64 encoded CA certificate
 }
 
 interface HttpResponse {
@@ -91,6 +93,7 @@ interface Collection {
   description?: string
   requests: CollectionRequest[]
   expanded?: boolean
+  caCertificate?: string // Base64 encoded CA certificate for the entire collection
 }
 
 export function HttpClient() {
@@ -101,6 +104,7 @@ export function HttpClient() {
     body: "",
     bodyType: "json",
     insecureSSL: false,
+    caCertificate: undefined,
   })
 
   const [response, setResponse] = useState<HttpResponse | null>(null)
@@ -115,6 +119,10 @@ export function HttpClient() {
   const [newCollectionName, setNewCollectionName] = useState("")
   const [editingCollection, setEditingCollection] = useState<string | null>(null)
   const [editingRequest, setEditingRequest] = useState<string | null>(null)
+
+  // CA Certificate state
+  const [showCaCertDialog, setShowCaCertDialog] = useState(false)
+  const [caCertFor, setCaCertFor] = useState<{ type: 'request' | 'collection', id?: string }>({ type: 'request' })
 
   const httpMethods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
 
@@ -238,6 +246,71 @@ export function HttpClient() {
     setShowCollectionsDialog(false)
   }
 
+  // CA Certificate functions
+  const handleCaCertificateUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    // Validate file type
+    if (!file.name.endsWith('.crt') && !file.name.endsWith('.pem') && !file.name.endsWith('.cer')) {
+      alert('Please select a valid certificate file (.crt, .pem, or .cer)')
+      return
+    }
+
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        const certificateContent = e.target?.result as string
+        
+        // Basic validation to ensure it looks like a certificate
+        if (!certificateContent.includes('BEGIN CERTIFICATE') && !certificateContent.includes('BEGIN TRUSTED CERTIFICATE')) {
+          alert('Invalid certificate format. Please ensure the file contains a valid X.509 certificate.')
+          return
+        }
+
+        // Convert to base64 for storage
+        const base64Cert = btoa(certificateContent)
+
+        if (caCertFor.type === 'request') {
+          setRequest(prev => ({ ...prev, caCertificate: base64Cert }))
+        } else if (caCertFor.type === 'collection' && caCertFor.id) {
+          setCollections(prev => 
+            prev.map(c => 
+              c.id === caCertFor.id 
+                ? { ...c, caCertificate: base64Cert }
+                : c
+            )
+          )
+        }
+
+        setShowCaCertDialog(false)
+      } catch (error) {
+        console.error('Failed to process certificate file:', error)
+        alert('Failed to process certificate file. Please ensure it is a valid certificate.')
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  const removeCaCertificate = (type: 'request' | 'collection', collectionId?: string) => {
+    if (type === 'request') {
+      setRequest(prev => ({ ...prev, caCertificate: undefined }))
+    } else if (type === 'collection' && collectionId) {
+      setCollections(prev => 
+        prev.map(c => 
+          c.id === collectionId 
+            ? { ...c, caCertificate: undefined }
+            : c
+        )
+      )
+    }
+  }
+
+  const openCaCertDialog = (type: 'request' | 'collection', collectionId?: string) => {
+    setCaCertFor({ type, id: collectionId })
+    setShowCaCertDialog(true)
+  }
+
   const exportCollections = () => {
     const dataStr = JSON.stringify(collections, null, 2)
     const dataBlob = new Blob([dataStr], { type: "application/json" })
@@ -285,6 +358,22 @@ export function HttpClient() {
       const requestBody =
         request.method === "GET" || request.method === "HEAD" || request.bodyType === "none" ? undefined : request.body
 
+      // Determine which CA certificate to use (request-specific takes precedence over collection-level)
+      let effectiveCaCert = request.caCertificate
+      if (!effectiveCaCert) {
+        // Find if this request belongs to a collection with a CA certificate
+        for (const collection of collections) {
+          const hasRequestInCollection = collection.requests.some(cr => 
+            cr.request.url === request.url && 
+            cr.request.method === request.method
+          )
+          if (hasRequestInCollection && collection.caCertificate) {
+            effectiveCaCert = collection.caCertificate
+            break
+          }
+        }
+      }
+
       const res = await fetch("/api/proxy", {
         method: "POST",
         headers: {
@@ -296,6 +385,7 @@ export function HttpClient() {
           headers: enabledHeaders,
           body: requestBody,
           insecureSSL: request.insecureSSL,
+          caCertificate: effectiveCaCert,
         }),
       })
 
@@ -583,7 +673,7 @@ export function HttpClient() {
                     className="hidden"
                   />
                   {request.url && (
-                    <Select onValueChange={(collectionId) => saveCurrentRequestToCollection(collectionId)}>
+                    <Select onValueChange={(collectionId: string) => saveCurrentRequestToCollection(collectionId)}>
                       <SelectTrigger className="w-48">
                         <SelectValue placeholder="Save to collection..." />
                       </SelectTrigger>
@@ -636,8 +726,23 @@ export function HttpClient() {
                             <Badge variant="secondary" className="text-xs">
                               {collection.requests.length}
                             </Badge>
+                            {collection.caCertificate && (
+                              <Badge variant="default" className="text-xs">
+                                <FileKey className="w-3 h-3 mr-1" />
+                                CA
+                              </Badge>
+                            )}
                           </div>
                           <div className="flex items-center gap-1">
+                            <Button
+                              variant={collection.caCertificate ? "default" : "ghost"}
+                              size="sm"
+                              className="h-6 w-6 p-0"
+                              onClick={() => openCaCertDialog('collection', collection.id)}
+                              title={collection.caCertificate ? "CA certificate configured for collection" : "Upload CA certificate for collection"}
+                            >
+                              <FileKey className="w-3 h-3" />
+                            </Button>
                             <Button
                               variant="ghost"
                               size="sm"
@@ -926,7 +1031,7 @@ export function HttpClient() {
                   Request Builder
                 </div>
                 {request.url && collections.length > 0 && (
-                  <Select onValueChange={(collectionId) => saveCurrentRequestToCollection(collectionId)}>
+                  <Select onValueChange={(collectionId: string) => saveCurrentRequestToCollection(collectionId)}>
                     <SelectTrigger className="w-48">
                       <SelectValue placeholder="Save to collection..." />
                     </SelectTrigger>
@@ -948,7 +1053,7 @@ export function HttpClient() {
               <div className="flex gap-2">
                 <Select
                   value={request.method}
-                  onValueChange={(value) => setRequest((prev) => ({ ...prev, method: value }))}
+                  onValueChange={(value: string) => setRequest((prev) => ({ ...prev, method: value }))}
                 >
                   <SelectTrigger className="w-32">
                     <SelectValue />
@@ -984,6 +1089,16 @@ export function HttpClient() {
                   <ShieldOff className="w-4 h-4" />
                   {request.insecureSSL && <span className="ml-1 text-xs">INSECURE</span>}
                 </Button>
+                <Button
+                  variant={request.caCertificate ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => openCaCertDialog('request')}
+                  className="px-3"
+                  title={request.caCertificate ? "Custom CA certificate configured" : "Upload CA certificate"}
+                >
+                  <FileKey className="w-4 h-4" />
+                  {request.caCertificate && <span className="ml-1 text-xs">CA</span>}
+                </Button>
                 <Button onClick={sendRequest} disabled={loading || !request.url} className="px-6">
                   {loading ? "Sending..." : "Send"}
                 </Button>
@@ -994,6 +1109,15 @@ export function HttpClient() {
                   <ShieldOff className="w-4 h-4 text-destructive" />
                   <span className="text-sm text-destructive font-medium">
                     ⚠️ SSL certificate verification is disabled (insecure mode)
+                  </span>
+                </div>
+              )}
+
+              {request.caCertificate && (
+                <div className="flex items-center gap-2 p-3 bg-green-50 dark:bg-green-950/20 border border-green-200 dark:border-green-800/40 rounded-md">
+                  <FileKey className="w-4 h-4 text-green-600 dark:text-green-400" />
+                  <span className="text-sm text-green-600 dark:text-green-400 font-medium">
+                    🔒 Custom CA certificate configured for SSL verification
                   </span>
                 </div>
               )}
@@ -1113,6 +1237,42 @@ export function HttpClient() {
                         <p>• This is equivalent to: <code className="bg-muted px-1 rounded">curl --insecure</code></p>
                       </div>
                     </div>
+                    
+                    <div className="p-4 border border-border rounded-lg bg-muted/50">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center space-x-2">
+                          <FileKey className="w-4 h-4 text-muted-foreground" />
+                          <Label className="text-sm font-medium">
+                            Custom CA Certificate
+                          </Label>
+                          {request.caCertificate && (
+                            <Badge variant="default" className="text-xs">
+                              <FileKey className="w-3 h-3 mr-1" />
+                              CONFIGURED
+                            </Badge>
+                          )}
+                        </div>
+                        <Button
+                          variant={request.caCertificate ? "default" : "outline"}
+                          size="sm"
+                          onClick={() => openCaCertDialog('request')}
+                        >
+                          {request.caCertificate ? "Replace" : "Upload"} Certificate
+                        </Button>
+                      </div>
+                      <div className="text-xs text-muted-foreground space-y-1">
+                        <p>🔒 Upload a custom CA certificate (.crt, .pem, .cer) for SSL/TLS verification.</p>
+                        <p>• Useful for self-signed certificates or internal Certificate Authorities</p>
+                        <p>• More secure than disabling SSL verification entirely</p>
+                        <p>• This is equivalent to: <code className="bg-muted px-1 rounded">curl --cacert certificate.crt</code></p>
+                      </div>
+                      {request.caCertificate && (
+                        <div className="mt-2 p-2 bg-green-50 dark:bg-green-950/20 border border-green-200 dark:border-green-800/40 rounded text-xs">
+                          <span className="text-green-600 dark:text-green-400">✓ CA certificate loaded and will be used for SSL verification</span>
+                        </div>
+                      )}
+                    </div>
+                    
                     <div className="text-muted-foreground">
                       <p className="text-sm">Other authentication options coming soon:</p>
                       <ul className="text-xs mt-2 space-y-1 ml-4">
@@ -1557,6 +1717,69 @@ export function HttpClient() {
           )}
         </div>
       </div>
+
+      {/* CA Certificate Upload Dialog */}
+      <Dialog open={showCaCertDialog} onOpenChange={setShowCaCertDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Upload CA Certificate</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="text-sm text-muted-foreground">
+              {caCertFor.type === 'collection' ? (
+                <>
+                  Upload a CA certificate for <strong>&ldquo;{collections.find(c => c.id === caCertFor.id)?.name}&rdquo;</strong> collection.
+                  <br />
+                  This certificate will be used for all HTTPS requests in this collection.
+                </>
+              ) : (
+                <>
+                  Upload a CA certificate for this specific request.
+                  <br />
+                  This certificate will only be used for SSL verification of this request.
+                </>
+              )}
+            </div>
+            
+            <div className="space-y-2">
+              <Label htmlFor="ca-cert-file">CA Certificate File</Label>
+              <Input
+                id="ca-cert-file"
+                type="file"
+                accept=".crt,.pem,.cer"
+                onChange={handleCaCertificateUpload}
+                className="file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-primary file:text-primary-foreground hover:file:bg-primary/90"
+              />
+            </div>
+
+            {((caCertFor.type === 'request' && request.caCertificate) || 
+              (caCertFor.type === 'collection' && caCertFor.id && collections.find(c => c.id === caCertFor.id)?.caCertificate)) && (
+              <div className="flex items-center justify-between p-3 bg-muted rounded-lg">
+                <div className="flex items-center gap-2">
+                  <FileKey className="w-4 h-4 text-green-600" />
+                  <span className="text-sm text-green-600 font-medium">CA Certificate Configured</span>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => removeCaCertificate(caCertFor.type, caCertFor.id)}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </Button>
+              </div>
+            )}
+
+            <div className="text-xs text-muted-foreground">
+              <div className="font-medium mb-1">Note:</div>
+              <ul className="space-y-1 text-xs">
+                <li>• The certificate will be used for SSL/TLS verification</li>
+                <li>• Supports PEM format certificates</li>
+                <li>• {caCertFor.type === 'collection' ? 'Applied to all requests in the collection' : 'Only applied to this specific request'}</li>
+              </ul>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
